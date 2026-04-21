@@ -190,6 +190,7 @@ castOpGeneric op = choose <=< numeric
   choose 9  = constant PtrToInt
   choose 10 = constant IntToPtr
   choose 11 = constant BitCast
+  choose 13 = constant PtrToAddr
   choose _  = mzero
 
 castOp :: Match Field (Maybe Int -> Typed PValue -> Type -> PInstr)
@@ -510,8 +511,16 @@ parseConstantEntry t (getTy,cs) (fromEntry -> Just r) =
     v <- parseCeGep CeGepCode32 t r
     return (getTy,Typed ty v:cs)
 
+  -- Pointer authentication constant expressions (Apple LLVM / arm64e). We don't
+  -- currently model these in llvm-pretty's AST, so parse them as poison to avoid
+  -- hard failures when encountering newer bitcode.
   33 -> label "CST_CODE_PTRAUTH (33)" $ do
-    notImplemented
+    ty <- getTy
+    return (getTy, Typed ty ValPoison : cs)
+
+  34 -> label "CST_CODE_PTRAUTH2 (34)" $ do
+    ty <- getTy
+    return (getTy, Typed ty ValPoison : cs)
 
   code -> Assert.unknownEntity "constant record code" code
 

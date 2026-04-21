@@ -1202,6 +1202,19 @@ parseMetadataEntry vt mt pm (fromEntry -> Just r) =
       return $! updateMetadataTable
         (addDebugInfo isDistinct DebugInfoAssignID) pm
 
+    48 -> label "METADATA_SUBRANGE_TYPE" $ do
+      -- LLVM 21+: Fortran-specific debug info. We don't model this yet; preserve
+      -- metadata indexing by inserting a placeholder node.
+      assertRecordSizeAtLeast r 1
+      isDistinct <- parseField r 0 nonzero
+      return $! updateMetadataTable (addNode isDistinct []) pm
+
+    49 -> label "METADATA_FIXED_POINT_TYPE" $ do
+      -- LLVM 21+: Fixed-point debug type. Preserve metadata indexing.
+      assertRecordSizeAtLeast r 1
+      isDistinct <- parseField r 0 nonzero
+      return $! updateMetadataTable (addNode isDistinct []) pm
+
     code -> fail ("unknown record code: " ++ show code)
 
 parseMetadataEntry _ _ pm (abbrevDef -> Just _) =

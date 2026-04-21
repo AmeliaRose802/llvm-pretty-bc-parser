@@ -21,7 +21,7 @@ import           Text.LLVM.AST
 import           Text.LLVM.Labels
 import           Text.LLVM.PP
 
-import           Control.Monad (when,unless,mplus,mzero,foldM,(<=<))
+import           Control.Monad (when,unless,forM_,mplus,mzero,foldM,(<=<))
 import           Data.Bits (shiftR,bit,shiftL,testBit,(.&.),(.|.),complement,Bits)
 import           Data.Int (Int32)
 import           Data.Word (Word32)
@@ -537,6 +537,16 @@ parseFunctionBlockEntry _ t d (fromEntry -> Just r) =
   13 -> label "FUNC_CODE_INST_INVOKE" $ do
     Assert.recordSizeGreater r 3
     let field = parseField r
+
+    pal <- field 0 numeric
+    when (pal /= (0 :: Int)) $ do
+      mb <- lookupParamAttrList pal
+      case mb of
+        Nothing -> pure ()
+        Just gids -> forM_ gids $ \gid -> do
+          _ <- lookupParamAttrGroup gid
+          pure ()
+
     ccinfo      <- field 1 unsigned
     normal      <- field 2 numeric
     unwind      <- field 3 numeric
@@ -710,7 +720,15 @@ parseFunctionBlockEntry _ t d (fromEntry -> Just r) =
     Assert.recordSizeGreater r 2
     let field = parseField r
 
-    -- pal <- field 0 numeric -- N.B. skipping param attributes
+    pal <- field 0 numeric
+    when (pal /= (0 :: Int)) $ do
+      mb <- lookupParamAttrList pal
+      case mb of
+        Nothing -> pure ()
+        Just gids -> forM_ gids $ \gid -> do
+          _ <- lookupParamAttrGroup gid
+          pure ()
+
     ccinfo <- field 1 numeric
     let ix0 = if testBit ccinfo 17 then 3 else 2 -- TODO(#61): skipping fast-math flags
     (mbFnTy, ix1) <- if testBit (ccinfo :: Word32) callExplicitTypeBit
@@ -963,7 +981,16 @@ parseFunctionBlockEntry _ t d (fromEntry -> Just r) =
     -- `callbr`, and `callbr` doesn't support fast math flags.
 
     let field = parseField r
-    -- pal <- field 0 numeric -- N.B. skipping param attributes
+
+    pal <- field 0 numeric
+    when (pal /= (0 :: Int)) $ do
+      mb <- lookupParamAttrList pal
+      case mb of
+        Nothing -> pure ()
+        Just gids -> forM_ gids $ \gid -> do
+          _ <- lookupParamAttrGroup gid
+          pure ()
+
     ccinfo <- field 1 unsigned
     normal <- field 2 numeric
     numIndirect <- field 3 numeric
@@ -1087,6 +1114,24 @@ parseFunctionBlockEntry _ t d (fromEntry -> Just r) =
               , drlLabel = typedValue lbl
               }
     updateLastStmt (addDebugRecord (DebugRecordLabel drl)) d
+
+  66 -> label "FUNC_CODE_DEBUG_RECORD_DECLARE_VALUE" $ do
+    -- LLVM 21+: [DILocation, DILocalVariable, DIExpression, ValueAsMetadata]
+    -- This is similar to FUNC_CODE_DEBUG_RECORD_DECLARE (62). We currently map it
+    -- to the same AST constructor.
+    assertRecordSizeIn r [4]
+    let field = parseField r
+    dil <- field 0 numeric >>= getMetadata
+    var <- field 1 numeric >>= getMetadata
+    expr <- field 2 numeric >>= getMetadata
+    rawloc <- field 3 numeric >>= getMetadata
+    let drd = DbgRecDeclare
+              { drdLocation = typedValue dil
+              , drdLocalVariable = typedValue var
+              , drdExpression = typedValue expr
+              , drdValAsMetadata = typedValue rawloc
+              }
+    updateLastStmt (addDebugRecord (DebugRecordDeclare drd)) d
 
   -- [opty,opval,opval,pred]
   code
@@ -1550,6 +1595,8 @@ getDecodedAtomicRWOp 13 = pure AtomicFMax
 getDecodedAtomicRWOp 14 = pure AtomicFMin
 getDecodedAtomicRWOp 15 = pure AtomicUIncWrap
 getDecodedAtomicRWOp 16 = pure AtomicUDecWrap
+getDecodedAtomicRWOp 19 = pure AtomicFMaximum
+getDecodedAtomicRWOp 20 = pure AtomicFMinimum
 getDecodedAtomicRWOp v  = Assert.unknownEntity "atomic RWOp" v
 
 {-

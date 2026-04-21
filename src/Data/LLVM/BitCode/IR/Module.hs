@@ -22,6 +22,7 @@ import Text.LLVM.Triple.Parse (parseTriple)
 import qualified Codec.Binary.UTF8.String as UTF8 (decode)
 import Control.Monad (foldM,guard,when,forM_)
 import Data.List (sortOn)
+import Data.Word (Word64)
 import qualified Data.Foldable as F
 import qualified Data.Map as Map
 import qualified Data.Sequence as Seq
@@ -94,6 +95,87 @@ finalizeModule pm = label "finalizeModule" $ do
       , modComdat     = Map.fromList (F.toList (partialComdat pm))
       }
 
+-- | Parse PARAMATTR and PARAMATTR_GROUP blocks, capturing only the small
+-- subset of attributes we care about (e.g., dead_on_return) and skipping the
+-- rest.
+parseParamAttrTables :: [Entry] -> Parse ()
+parseParamAttrTables ents = forM_ ents $ \e ->
+  case e of
+    (paramattrGroupBlockId -> Just es) -> parseParamAttrGroupBlock es
+    (paramattrBlockId      -> Just es) -> parseParamAttrBlock es
+    _ -> pure ()
+
+parseParamAttrBlock :: [Entry] -> Parse ()
+parseParamAttrBlock ents = label "PARAMATTR_BLOCK" $
+  forM_ ents $ \e ->
+    case e of
+      (fromEntry -> Just r) ->
+        case recordCode r of
+          -- PARAMATTR_CODE_ENTRY: [attrgrp0, attrgrp1, ...]
+          2 -> do
+            gids <- parseFields r 0 (numeric :: Match Field Int)
+            addParamAttrList gids
+          -- PARAMATTR_CODE_ENTRY_OLD (deprecated)
+          _ -> pure ()
+      _ -> pure ()
+
+parseParamAttrGroupBlock :: [Entry] -> Parse ()
+parseParamAttrGroupBlock ents = label "PARAMATTR_GROUP_BLOCK" $
+  forM_ ents $ \e ->
+    case e of
+      (fromEntry -> Just r) ->
+        case recordCode r of
+          -- PARAMATTR_GRP_CODE_ENTRY: [grpid, idx, attr0, attr1, ...]
+          3 -> do
+            gid <- parseField r 0 (numeric :: Match Field Int)
+            idx <- parseField r 1 (numeric :: Match Field Word64)
+            attrs <- parseParamAttrs r 2
+            addParamAttrGroup gid ParamAttrGroup { pagIndex = idx, pagAttrs = attrs }
+          _ -> pure ()
+      _ -> pure ()
+
+-- Parse the flat attribute list in a PARAMATTR_GRP_CODE_ENTRY record.
+--
+-- We only retain dead_on_return (LLVM 22) and dead_on_unwind (LLVM 21) for now.
+parseParamAttrs :: Record -> Int -> Parse [ParamAttr]
+parseParamAttrs r0 start = go start []
+  where
+    r = flattenRecord r0
+    len = length (recordFields r)
+
+    go i acc
+      | i >= len  = pure (reverse acc)
+      | otherwise = do
+          kind <- parseField r i (numeric :: Match Field Word64)
+          case kind of
+            -- well-known attribute (no value)
+            0 -> do
+              key <- parseField r (i+1) (numeric :: Match Field Word64)
+              let acc' = case key of
+                    91  -> DeadOnUnwind : acc
+                    103 -> DeadOnReturn : acc
+                    _   -> acc
+              go (i+2) acc'
+            -- well-known attribute with integer value
+            1 -> go (i+3) acc
+            -- string attribute
+            3 -> do
+              j <- skipCString (i+1)
+              go j acc
+            -- string attribute with string value
+            4 -> do
+              j <- skipCString (i+1)
+              k <- skipCString j
+              go k acc
+            -- unknown kind code; skip the rest conservatively
+            _ -> pure (reverse acc)
+
+    skipCString j
+      | j >= len  = pure j
+      | otherwise = do
+          w <- parseField r j (numeric :: Match Field Word64)
+          if w == 0 then pure (j+1) else skipCString (j+1)
+
 -- | Parse an LLVM Module out of the top-level block in a Bitstream.
 parseModuleBlock :: [Entry] -> Parse Module
 parseModuleBlock ents = label "MODULE_BLOCK" $ do
@@ -113,6 +195,25 @@ parseModuleBlock ents = label "MODULE_BLOCK" $ do
       case mb of
         Just es -> parseValueSymbolTableBlock es
         Nothing -> return emptyValueSymtab
+
+    -- LLVM 21+ may store the string table inside the module block.
+    -- We need to discover it up-front so that name records that use the string
+    -- table can be parsed.
+    forM_ ents $ \e ->
+      case e of
+        (moduleStrtabBlockId -> Just es) ->
+          forM_ es $ \e' ->
+            case fromEntry e' of
+              Just r | recordCode r == 1 -> do
+                st <- mkStrtab <$> parseField r 0 fieldBlob
+                setStringTable st
+              _ -> pure ()
+        _ -> pure ()
+
+    -- Parse PARAMATTR / PARAMATTR_GROUP tables up-front so later records that
+    -- reference them (e.g., call/callbr/invoke, function declarations) can be
+    -- validated without depending on block ordering.
+    parseParamAttrTables ents
 
     pm <- withValueSymtab symtab
         $ foldM parseModuleBlockEntry emptyPartialModule ents
@@ -221,7 +322,9 @@ parseModuleBlockEntry pm (moduleCodeVersion -> Just r) = do
     0 -> setRelIds False  -- Absolute value ids in LLVM <= 3.2
     1 -> setRelIds True   -- Relative value ids in LLVM >= 3.3
     2 -> setRelIds True   -- Relative value ids in LLVM >= 5.0
-    _ -> fail ("unsupported version id: " ++ show version)
+    -- LLVM 21+ currently still uses relative value ids, but may bump the
+    -- module version id. Accept newer ids conservatively.
+    _ -> setRelIds True
 
   return pm
 
@@ -273,9 +376,10 @@ parseModuleBlockEntry pm (uselistBlockId -> Just _) = do
   -- XXX ?? fail "USELIST_BLOCK_ID"
   return pm
 
-parseModuleBlockEntry _ (moduleStrtabBlockId -> Just _) = do
+parseModuleBlockEntry pm (moduleStrtabBlockId -> Just _) = do
   -- MODULE_STRTAB_BLOCK_ID
-  fail "MODULE_STRTAB_BLOCK_ID"
+  -- Parsed eagerly in parseModuleBlock (so name records can resolve symbols).
+  return pm
 
 parseModuleBlockEntry pm (globalvalSummaryBlockId -> Just _) = do
   -- GLOBALVAL_SUMMARY_BLOCK_ID
@@ -313,6 +417,11 @@ parseModuleBlockEntry pm (syncScopeNamesBlockId -> Just _) =
     -- TODO: record this information somewhere
     return pm
 
+-- New LLVM versions occasionally add optional module sub-blocks. If we don't
+-- understand one, skip it rather than failing to parse the whole module.
+parseModuleBlockEntry pm (block -> Just _) =
+  return pm
+
 parseModuleBlockEntry _ e =
   fail ("unexpected module block entry: " ++ show e)
 
@@ -329,6 +438,19 @@ parseFunProto r pm = label "FUNCTION" $ do
   isProto <-             field 2 numeric
 
   link    <-             field 3 linkage
+
+  -- Validate the referenced parameter attribute list (if present). We do not
+  -- currently model function/parameter attributes in the AST, but parsing these
+  -- tables ensures LLVM 21+ attributes like dead_on_return don't break parsing.
+  when (length (recordFields r) > (4 + offset)) $ do
+    pal <- field 4 numeric
+    when (pal /= (0 :: Int)) $ do
+      mb <- lookupParamAttrList pal
+      case mb of
+        Nothing -> pure ()
+        Just gids -> forM_ gids $ \gid -> do
+          _ <- lookupParamAttrGroup gid
+          pure ()
 
   vis     <-             field 7 visibility
 

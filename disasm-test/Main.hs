@@ -344,6 +344,29 @@ main =  do
   llvmAsVC <- getLLVMAsVersion llvmAs'
   llvmDisVC <- getLLVMDisVersion llvmDis'
   clangVC <- getClangVersion clang'
+
+  let missing = Left "[missing]" :: Either T.Text Versioning
+  when (any (== missing) [ vcVersioning llvmAsVC
+                         , vcVersioning llvmDisVC
+                         , vcVersioning clangVC
+                         ]) $ do
+    let reason = "missing LLVM toolchain (llvm-as/llvm-dis/clang)"
+    hPutStrLn IO.stderr $ "Skipping disasm-test: " <> reason
+    let skipped = testGroup "Disassembly tests"
+          [ ignoreTestBecause reason $
+              testCase "requires llvm-as/llvm-dis/clang" (pure ())
+          ]
+    case TR.tryIngredients
+           (disasmTestIngredients rootPth llvmAsVC)
+           disasmOpts
+           skipped of
+      Nothing ->
+        hPutStrLn IO.stderr
+          "No ingredients agreed to run. Something is wrong either with your ingredient set or the options."
+      Just act -> do
+        ok <- act
+        if ok then exitSuccess else exitFailure
+
   unless (and [ vcVersioning llvmAsVC == vcVersioning llvmDisVC
               , vcVersioning llvmAsVC == vcVersioning clangVC
               ]) $
@@ -439,15 +462,29 @@ rangeMatch llvmver cb swts = do
   -- llvm (reported by llvm-as) to filter the tasty-sugar expectations.  Note
   -- that there is a built-in expectation here that there is only one llvm
   -- version available to the test.
-  let llvmMajorVer = vcVersioning llvmver ^? (_Right . major)
+  let llvmMajorVerMb = vcVersioning llvmver ^? (_Right . major)
   let getPreVer = readMaybe . drop (length ("pre-llvm" :: String))
   let getPostVer = readMaybe . drop (length ("post-llvm" :: String))
-  -- Filter any expected entries for each sweet where the expected needs an
-  -- /earlier/ version of LLVM than the available version of the LLVM tools.
-  ts1 <- TS.rangedParamAdjuster "llvm-range" getPreVer (<) llvmMajorVer cb swts
-  -- Filter any expected entries for each sweet where the expected needs a
-  -- /later/ version of LLVM than the available version of the LLVM tools.
-  ts2 <- TS.rangedParamAdjuster "llvm-range" getPostVer (>) llvmMajorVer cb ts1
+
+  -- If we can't determine the LLVM major version (e.g., tool missing or version
+  -- string not parseable), skip range matching rather than crashing.
+  let llvmMajorVer =
+        case llvmMajorVerMb of
+          Just 0 -> Nothing
+          mb     -> mb
+
+  ts2 <-
+    case llvmMajorVer of
+      Nothing ->
+        -- Can't range match without a tool version.
+        return swts
+      Just{} -> do
+        -- Filter any expected entries for each sweet where the expected needs an
+        -- /earlier/ version of LLVM than the available version of the LLVM tools.
+        ts1 <- TS.rangedParamAdjuster "llvm-range" getPreVer (<) llvmMajorVer cb swts
+        -- Filter any expected entries for each sweet where the expected needs a
+        -- /later/ version of LLVM than the available version of the LLVM tools.
+        TS.rangedParamAdjuster "llvm-range" getPostVer (>) llvmMajorVer cb ts1
   -- Only expect a single expected file for a particular LLVM range.  For
   -- example, given two files: foo.pre-llvm18.ll and foo.pre-llvm15.ll, then if
   -- the available LLVM tool is version 16, use the former, and if the available

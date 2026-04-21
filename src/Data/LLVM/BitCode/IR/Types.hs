@@ -191,12 +191,12 @@ parseTypeBlockEntry (fromEntry -> Just r) = case recordCode r of
       []       -> fail "function expects a return type"
 
   22 -> label "TYPE_CODE_TOKEN" $ do
-    notImplemented
+    addType (PrimType Token)
 
   23 -> label "TYPE_CODE_BFLOAT" (addType (PrimType (FloatType BFloat)))
 
   24 -> label "TYPE_CODE_X86_AMX" $ do
-    notImplemented
+    addType (PrimType X86amx)
 
   25 -> label "TYPE_CODE_OPAQUE_POINTER" $ do
     let field = parseField r

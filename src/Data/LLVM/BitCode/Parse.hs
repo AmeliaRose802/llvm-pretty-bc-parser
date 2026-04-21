@@ -28,7 +28,7 @@ import qualified Data.Foldable as F
 import           Data.Maybe (fromMaybe)
 import           Data.Semigroup
 import           Data.Typeable (Typeable)
-import           Data.Word ( Word32 )
+import           Data.Word ( Word32, Word64 )
 
 import qualified Codec.Binary.UTF8.String as UTF8 (decode)
 import qualified Control.Exception as X
@@ -111,40 +111,49 @@ notImplemented  = fail "not implemented"
 
 -- Parse State -----------------------------------------------------------------
 
+data ParamAttrGroup = ParamAttrGroup
+  { pagIndex :: !Word64
+  , pagAttrs :: [ParamAttr]
+  } deriving (Show)
+
 data ParseState = ParseState
-  { psTypeTable     :: TypeTable
-  , psTypeTableSize :: !Int
-  , psValueTable    :: ValueTable
-  , psStringTable   :: Maybe StringTable
-  , psMdTable       :: ValueTable
-  , psMdRefs        :: MdRefTable
-  , psFunProtos     :: Seq.Seq FunProto
-  , psNextResultId  :: !Int
-  , psTypeName      :: Maybe String
-  , psNextTypeId    :: !Int
-  , psLastLoc       :: Maybe PDebugLoc
-  , psKinds         :: !KindTable
-  , psModVersion    :: !Int
-  , psWarnings      :: Seq.Seq ParseWarning
+  { psTypeTable        :: TypeTable
+  , psTypeTableSize    :: !Int
+  , psValueTable       :: ValueTable
+  , psStringTable      :: Maybe StringTable
+  , psMdTable          :: ValueTable
+  , psMdRefs           :: MdRefTable
+  , psFunProtos        :: Seq.Seq FunProto
+  , psNextResultId     :: !Int
+  , psTypeName         :: Maybe String
+  , psNextTypeId       :: !Int
+  , psLastLoc          :: Maybe PDebugLoc
+  , psKinds            :: !KindTable
+  , psModVersion       :: !Int
+  , psWarnings         :: Seq.Seq ParseWarning
+  , psParamAttrGroups  :: !(IntMap.IntMap ParamAttrGroup)
+  , psParamAttrLists   :: Seq.Seq [Int]
   } deriving (Show)
 
 -- | The initial parsing state.
 emptyParseState :: ParseState
 emptyParseState  = ParseState
-  { psTypeTable     = IntMap.empty
-  , psTypeTableSize = 0
-  , psValueTable    = emptyValueTable False
-  , psStringTable   = Nothing
-  , psMdTable       = emptyValueTable False
-  , psMdRefs        = IntMap.empty
-  , psFunProtos     = Seq.empty
-  , psNextResultId  = 0
-  , psTypeName      = Nothing
-  , psNextTypeId    = 0
-  , psLastLoc       = Nothing
-  , psKinds         = emptyKindTable
-  , psModVersion    = 0
-  , psWarnings      = Seq.empty
+  { psTypeTable       = IntMap.empty
+  , psTypeTableSize   = 0
+  , psValueTable      = emptyValueTable False
+  , psStringTable     = Nothing
+  , psMdTable         = emptyValueTable False
+  , psMdRefs          = IntMap.empty
+  , psFunProtos       = Seq.empty
+  , psNextResultId    = 0
+  , psTypeName        = Nothing
+  , psNextTypeId      = 0
+  , psLastLoc         = Nothing
+  , psKinds           = emptyKindTable
+  , psModVersion      = 0
+  , psWarnings        = Seq.empty
+  , psParamAttrGroups = IntMap.empty
+  , psParamAttrLists  = Seq.empty
   }
 
 -- | The next implicit result id.
@@ -183,6 +192,26 @@ setModVersion v = Parse $ do
 
 getModVersion :: Parse Int
 getModVersion = Parse (psModVersion <$> get)
+
+addParamAttrGroup :: Int -> ParamAttrGroup -> Parse ()
+addParamAttrGroup gid grp = Parse $ do
+  ps <- get
+  put $! ps { psParamAttrGroups = IntMap.insert gid grp (psParamAttrGroups ps) }
+
+addParamAttrList :: [Int] -> Parse ()
+addParamAttrList gids = Parse $ do
+  ps <- get
+  put $! ps { psParamAttrLists = psParamAttrLists ps Seq.|> gids }
+
+lookupParamAttrList :: Int -> Parse (Maybe [Int])
+lookupParamAttrList ix = Parse $ do
+  ps <- get
+  pure $ Seq.lookup (ix - 1) (psParamAttrLists ps)
+
+lookupParamAttrGroup :: Int -> Parse (Maybe ParamAttrGroup)
+lookupParamAttrGroup gid = Parse $ do
+  ps <- get
+  pure $ IntMap.lookup gid (psParamAttrGroups ps)
 
 -- | Sort of a hack to preserve state between function body parses.  It would
 -- really be nice to separate this into a different monad, that could just run
