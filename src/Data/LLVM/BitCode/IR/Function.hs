@@ -941,23 +941,52 @@ parseFunctionBlockEntry _ t d (fromEntry -> Just r) =
     result ty (LandingPad ty Nothing isCleanup clauses) d
 
   48 -> label "FUNC_CODE_CLEANUPRET" $ do
-    -- Assert.recordSizeIn r [1, 2]
-    notImplemented
+    -- [val, bb or -1]
+    let field = parseField r
+    (pad,ix) <- getValueTypePair t r 0
+    hasUnwind <- (/= (0 :: Int)) <$> field ix numeric
+    if hasUnwind
+      then do unwindBB <- field (ix+1) numeric
+              effect (CleanupRet pad (Just unwindBB)) d
+      else effect (CleanupRet pad Nothing) d
 
   49 -> label "FUNC_CODE_CATCHRET" $ do
-    -- Assert.recordSizeIn r [2]
-    notImplemented
+    -- [val, bb]
+    let field = parseField r
+    (pad,ix) <- getValueTypePair t r 0
+    succBB   <- field ix numeric
+    effect (CatchRet pad succBB) d
 
   50 -> label "FUNC_CODE_CATCHPAD" $ do
-    notImplemented
+    -- [catchswitch, num_args, args...]
+    let field = parseField r
+    (parent,ix) <- getValueTypePair t r 0
+    numArgs     <- field ix numeric
+    args        <- mapM (\i -> fst <$> getValueTypePair t r (ix + 1 + i)) [0..numArgs-1]
+    let tokenTy = PrimType Token
+    result tokenTy (CatchPad parent args) d
 
   51 -> label "FUNC_CODE_CLEANUPPAD" $ do
-    -- Assert.recordSizeGreater r [1]
-    notImplemented
+    -- [num_args, args...]
+    let field = parseField r
+    (parent,ix) <- getValueTypePair t r 0
+    numArgs     <- field ix numeric
+    args        <- mapM (\i -> fst <$> getValueTypePair t r (ix + 1 + i)) [0..numArgs-1]
+    let tokenTy = PrimType Token
+    result tokenTy (CleanupPad parent args) d
 
   52 -> label "FUNC_CODE_CATCHSWITCH" $ do
-    -- Assert.recordSizeGreater r [1]
-    notImplemented
+    -- [num_handlers, handler0, handler1, ..., unwind_dest or -1]
+    let field = parseField r
+    (parent,ix) <- getValueTypePair t r 0
+    numHandlers <- field ix numeric
+    handlers    <- mapM (\i -> field (ix + 1 + i) numeric) [0..numHandlers-1]
+    let ixAfter = ix + 1 + numHandlers
+    hasUnwind   <- (/= (0 :: Int)) <$> field ixAfter numeric
+    if hasUnwind
+      then do unwindBB <- field (ixAfter+1) numeric
+              effect (CatchSwitch parent handlers (Just unwindBB)) d
+      else effect (CatchSwitch parent handlers Nothing) d
 
   -- 53 is unused
   -- 54 is unused
